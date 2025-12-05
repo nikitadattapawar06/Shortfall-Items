@@ -19,14 +19,14 @@ function get_loader_html(message = "Loading...") {
 }
 
 // =======================================================
-// HELPER: CHECK IF WORK ORDER HAS DRAFT MR
+// CHECK IF ANY MR EXISTS (excluding cancelled MR)
 // =======================================================
-async function has_draft_mr(wo_name) {
+async function work_order_has_any_mr(wo_name) {
     let mr = await frappe.db.get_list("Material Request", {
         filters: {
             work_order: wo_name,
             custom_shortfall_item_mr: 1,
-            docstatus: 0   // DRAFT only
+            docstatus: ["!=", 2] // Exclude Cancelled
         },
         limit: 1
     });
@@ -43,16 +43,19 @@ frappe.ui.form.on('Shortfall Items', {
     },
 
     bind_buttons(frm) {
-        frm.fields_dict.get_work_orders.$input?.off("click").on("click", () => frm.trigger("load_work_orders"));
-        frm.fields_dict.get_purchase_request.$input?.off("click").on("click", () => frm.trigger("load_purchase_requests"));
+        frm.fields_dict.get_work_orders.$input?.off("click").on("click",
+            () => frm.trigger("load_work_orders")
+        );
+        frm.fields_dict.get_purchase_request.$input?.off("click").on("click",
+            () => frm.trigger("load_purchase_requests")
+        );
     },
 
     // ===================================================
-    // 1️⃣ LOAD WORK ORDERS WITH SHORTFALL
+    // 1️⃣ LOAD WORK ORDERS WITH TRUE SHORTFALL
     // ===================================================
     async load_work_orders(frm) {
 
-        // Show loader immediately
         frm.set_df_property("work_order", "options",
             get_loader_html("Scanning Work Orders for Shortfall...")
         );
@@ -66,32 +69,37 @@ frappe.ui.form.on('Shortfall Items', {
 
         for (let wo of work_orders) {
 
-            if (await has_draft_mr(wo.name)) continue; // Skip WO if DRAFT MR exists
+            // Skip if MR exists (not cancelled)
+            if (await work_order_has_any_mr(wo.name)) continue;
 
             let wo_doc = await frappe.db.get_doc("Work Order", wo.name);
 
             for (let item of wo_doc.required_items) {
 
-                if (!item.source_warehouse) continue;
+                // Use valid source warehouse
+                let source_wh = item.source_warehouse || wo_doc.source_warehouse || wo_doc.wip_warehouse;
+                if (!source_wh) continue;
 
                 let bin = await frappe.db.get_value("Bin", {
                     item_code: item.item_code,
-                    warehouse: item.source_warehouse
+                    warehouse: source_wh
                 }, ["actual_qty", "projected_qty"]);
 
                 let actual_qty = bin?.message?.actual_qty || 0;
                 let projected_qty = bin?.message?.projected_qty || 0;
-                let shortfall = flt(item.required_qty) - actual_qty;
+                let required_qty = item.required_qty || 0;
 
-                if (shortfall <= 0) continue;
+                let shortfall = required_qty - actual_qty;
+
+                if (shortfall <= 0) continue;  // Only include real shortfall
 
                 rows.push({
                     wo_name: wo.name,
                     wo_status: wo.status,
                     item: item.item_code,
-                    source_wh: item.source_warehouse,
+                    source_wh: source_wh,
                     target_wh: item.warehouse || "",
-                    req_qty: item.required_qty,
+                    req_qty: required_qty,
                     actual_qty: actual_qty,
                     projected_qty: projected_qty,
                     shortfall: shortfall
@@ -106,7 +114,7 @@ frappe.ui.form.on('Shortfall Items', {
             return;
         }
 
-        // Group by Work Order
+        // Group shortfalls by Work Order
         let grouped = {};
         rows.forEach(r => {
             if (!grouped[r.wo_name]) grouped[r.wo_name] = [];
@@ -132,25 +140,27 @@ frappe.ui.form.on('Shortfall Items', {
         `;
 
         for (let wo in grouped) {
-
             let wo_status = grouped[wo][0].wo_status;
 
             html += `
                 <div class="wo-head">
-                    <a href="/app/work-order/${wo}" target="_blank">${wo}</a> | Status: ${wo_status}
-                    <button class="btn btn-primary btn-xs mr-btn" data-wo="${wo}">Create MR</button>
+                    <a href="/app/work-order/${wo}" target="_blank">${wo}</a>
+                    | Status: ${wo_status}
+                    <button class="btn btn-primary btn-xs mr-btn" data-wo="${wo}">
+                        Create Material Request
+                    </button>
                 </div>
 
                 <table class="table table-bordered table-sm">
                     <thead>
                         <tr>
                             <th>Item</th>
-                            <th>Source Warehouse</th>
-                            <th>Target Warehouse</th>
-                            <th>Required Qty</th>
-                            <th>Current Stock</th>
-                            <th>Projected Qty</th>
-                            <th>Shortfall Qty</th>
+                            <th>Source WH</th>
+                            <th>Target WH</th>
+                            <th>Required</th>
+                            <th>Stock</th>
+                            <th>Projected</th>
+                            <th>Shortfall</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -175,10 +185,9 @@ frappe.ui.form.on('Shortfall Items', {
 
         frm.set_df_property("work_order", "options", html);
 
-        // Create MR button click
+        // Create MR button
         setTimeout(() => {
             $(".mr-btn").off("click").on("click", function () {
-
                 let wo = $(this).data("wo");
 
                 frappe.call({
@@ -190,32 +199,39 @@ frappe.ui.form.on('Shortfall Items', {
 
                         if (!r.message) return;
 
+                        if (r.message.already_exists) {
+                            frappe.msgprint(`⚠ MR already exists: 
+                                <a href="/app/material-request/${r.message.mr_name}" target="_blank">
+                                    ${r.message.mr_name}
+                                </a>`);
+                            return;
+                        }
+
                         frappe.msgprint(`<b>✅ Material Request Created:</b><br>
                             <a href="/app/material-request/${r.message.mr_name}" target="_blank">
                                 ${r.message.mr_name}
-                            </a>`);
+                            </a>`
+                        );
 
-                        frm.trigger("load_work_orders"); // Refresh list
+                        frm.trigger("load_work_orders");
                     }
                 });
             });
         }, 200);
     },
 
-
     // ===================================================
-    // 2️⃣ LOAD DRAFT PURCHASE REQUESTS WITH DETAILS
+    // 2️⃣ LOAD DRAFT MATERIAL REQUESTS
     // ===================================================
     async load_purchase_requests(frm) {
 
-        // Show loader immediately
         frm.set_df_property("purchase_request", "options",
             get_loader_html("Loading Draft Shortfall Requests...")
         );
 
         let mr_list = await frappe.db.get_list("Material Request", {
             filters: { custom_shortfall_item_mr: 1, docstatus: 0 },
-            fields: ["name", "work_order", "status", "docstatus"],
+            fields: ["name", "work_order"],
             order_by: "creation desc"
         });
 
@@ -243,20 +259,13 @@ frappe.ui.form.on('Shortfall Items', {
             let mr_doc = await frappe.db.get_doc("Material Request", mr.name);
             let wo_doc = await frappe.db.get_doc("Work Order", mr.work_order);
 
-            // Map WO items
-            let wo_items_map = {};
-            wo_doc.required_items.forEach(i => {
-                wo_items_map[i.item_code] = i;
-            });
-
             html += `
                 <div class="mr-head">
-                    Purchase Request:
+                    Purchase Request: 
                     <a href="/app/material-request/${mr.name}" target="_blank">${mr.name}</a>
-                    &nbsp;|&nbsp;
-                    Work Order:
+                    &nbsp;| WO: 
                     <a href="/app/work-order/${mr.work_order}" target="_blank">${mr.work_order}</a>
-                    &nbsp;|&nbsp;WO Status: ${wo_doc.status}
+                    &nbsp;| WO Status: ${wo_doc.status}
                     <span style="float:right;">MR Status: Draft</span>
                 </div>
 
@@ -264,22 +273,20 @@ frappe.ui.form.on('Shortfall Items', {
                     <thead>
                         <tr>
                             <th>Item</th>
-                            <th>Source Warehouse</th>
-                            <th>Target Warehouse</th>
-                            <th>Required Qty</th>
-                            <th>Current Stock</th>
-                            <th>Projected Qty</th>
-                            <th>Shortfall Qty</th>
+                            <th>Source WH</th>
+                            <th>Target WH</th>
+                            <th>Required</th>
+                            <th>Stock</th>
+                            <th>Projected</th>
+                            <th>Shortfall</th>
                         </tr>
                     </thead>
                     <tbody>
             `;
 
             for (let item of mr_doc.items) {
-
-                let wo_item = wo_items_map[item.item_code] || {};
+                let wo_item = wo_doc.required_items.find(i => i.item_code === item.item_code) || {};
                 let source_wh = wo_item.source_warehouse || "N/A";
-                let target_wh = item.warehouse || "N/A";
                 let required_qty = wo_item.required_qty || item.qty;
 
                 let stock = await frappe.db.get_value("Bin", {
@@ -287,19 +294,19 @@ frappe.ui.form.on('Shortfall Items', {
                     warehouse: source_wh
                 }, ["actual_qty", "projected_qty"]);
 
-                let actual_qty = stock?.message?.actual_qty || 0;
-                let projected_qty = stock?.message?.projected_qty || 0;
-                let shortfall = required_qty - actual_qty;
+                let actual = stock?.message?.actual_qty || 0;
+                let projected = stock?.message?.projected_qty || 0;
+                let shortfall = required_qty - actual;
                 if (shortfall < 0) shortfall = 0;
 
                 html += `
                     <tr>
                         <td>${item.item_code}</td>
                         <td>${source_wh}</td>
-                        <td>${target_wh}</td>
+                        <td>${item.warehouse || "N/A"}</td>
                         <td>${required_qty}</td>
-                        <td>${actual_qty}</td>
-                        <td>${projected_qty}</td>
+                        <td>${actual}</td>
+                        <td>${projected}</td>
                         <td><b style="color:red;">${shortfall}</b></td>
                     </tr>
                 `;
@@ -310,5 +317,4 @@ frappe.ui.form.on('Shortfall Items', {
 
         frm.set_df_property("purchase_request", "options", html);
     }
-
 });
