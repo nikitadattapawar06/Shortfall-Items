@@ -98,7 +98,6 @@ frappe.ui.form.on('Shortfall Items', {
                     wo_status: wo.status,
                     item: item.item_code,
                     source_wh: source_wh,
-                    target_wh: item.warehouse || "",
                     req_qty: required_qty,
                     actual_qty: actual_qty,
                     projected_qty: projected_qty,
@@ -156,7 +155,6 @@ frappe.ui.form.on('Shortfall Items', {
                         <tr>
                             <th>Item</th>
                             <th>Source WH</th>
-                            <th>Target WH</th>
                             <th>Required</th>
                             <th>Stock</th>
                             <th>Projected</th>
@@ -171,7 +169,6 @@ frappe.ui.form.on('Shortfall Items', {
                     <tr>
                         <td>${r.item}</td>
                         <td>${r.source_wh}</td>
-                        <td>${r.target_wh}</td>
                         <td>${r.req_qty}</td>
                         <td>${r.actual_qty}</td>
                         <td>${r.projected_qty}</td>
